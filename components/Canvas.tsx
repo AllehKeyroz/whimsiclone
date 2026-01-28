@@ -6,6 +6,7 @@ import Toolbar from './Toolbar';
 import PropertiesBar from './PropertiesBar';
 import { generateMindMapData } from '../services/geminiService';
 import { Loader2 } from 'lucide-react';
+import { getRectIntersection } from '../utils/geometry';
 
 const INITIAL_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1 };
 
@@ -22,8 +23,11 @@ const Canvas: React.FC = () => {
   const [connectionSourceId, setConnectionSourceId] = useState<string | null>(null);
   const [mouseCanvasPos, setMouseCanvasPos] = useState<{x: number, y: number}>({x: 0, y: 0});
 
+  // Selection Box State
+  const [selectionBox, setSelectionBox] = useState<{startX: number, startY: number, endX: number, endY: number} | null>(null);
+
   const containerRef = useRef<HTMLDivElement>(null);
-  const dragTargetRef = useRef<'viewport' | 'node' | null>(null);
+  const dragTargetRef = useRef<'viewport' | 'node' | 'selection' | null>(null);
   const lastMousePos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
   // Update CSS variables for grid scaling
@@ -79,14 +83,21 @@ const Canvas: React.FC = () => {
         dragTargetRef.current = 'viewport';
         setIsPanning(true);
     } else if (isCanvasClick) {
-        if (activeTool !== ToolType.SELECT && activeTool !== ToolType.PAN && activeTool !== ToolType.CONNECTOR) {
+        if (activeTool === ToolType.SELECT) {
+            // Start Rubber Band Selection
+            dragTargetRef.current = 'selection';
+            setSelectionBox({ startX: x, startY: y, endX: x, endY: y });
+            if (!e.shiftKey) setSelectedNodeIds(new Set());
+            setConnectionSourceId(null);
+        } else if (activeTool !== ToolType.CONNECTOR) {
             const newNode = createNode(activeTool as unknown as NodeType, x, y);
             setNodes(prev => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
             if (!e.shiftKey) setActiveTool(ToolType.SELECT);
         } else {
-            setSelectedNodeIds(new Set());
-            setConnectionSourceId(null);
+            // Connector tool click on canvas - clear selection
+             setSelectedNodeIds(new Set());
+             setConnectionSourceId(null);
         }
     }
     
@@ -111,10 +122,29 @@ const Canvas: React.FC = () => {
             }
             return node;
         }));
+    } else if (dragTargetRef.current === 'selection' && selectionBox) {
+        setSelectionBox(prev => prev ? { ...prev, endX: x, endY: y } : null);
     }
   };
 
   const handleMouseUp = () => {
+    if (dragTargetRef.current === 'selection' && selectionBox) {
+        // Calculate intersection
+        const x1 = Math.min(selectionBox.startX, selectionBox.endX);
+        const x2 = Math.max(selectionBox.startX, selectionBox.endX);
+        const y1 = Math.min(selectionBox.startY, selectionBox.endY);
+        const y2 = Math.max(selectionBox.startY, selectionBox.endY);
+
+        const newSelected = new Set(selectedNodeIds);
+        nodes.forEach(node => {
+            if (node.x < x2 && node.x + node.width > x1 &&
+                node.y < y2 && node.y + node.height > y1) {
+                newSelected.add(node.id);
+            }
+        });
+        setSelectedNodeIds(newSelected);
+        setSelectionBox(null);
+    }
     dragTargetRef.current = null;
     setIsPanning(false);
   };
@@ -153,6 +183,33 @@ const Canvas: React.FC = () => {
         return;
     }
 
+    // Ctrl+Drag or Alt+Drag to duplicate
+    if (e.altKey || (e.ctrlKey && !e.metaKey)) { // metaKey check to avoid conflict with standard Mac shortcuts if needed, but usually Ctrl+Click is right click on Mac.
+        // Wait, on Mac Ctrl+Click is often right click. But user specifically asked for "ctrl + arrastar".
+        // Let's support Alt (Option) as well as it's standard.
+
+        let nodesToCloneIds = new Set([id]);
+        if (selectedNodeIds.has(id)) {
+            nodesToCloneIds = selectedNodeIds;
+        }
+
+        const newNodes: CanvasNode[] = [];
+        const newIds = new Set<string>();
+
+        nodes.forEach(node => {
+            if (nodesToCloneIds.has(node.id)) {
+                const newNode = { ...node, id: generateId() };
+                newNodes.push(newNode);
+                newIds.add(newNode.id);
+            }
+        });
+
+        setNodes(prev => [...prev, ...newNodes]);
+        setSelectedNodeIds(newIds);
+        dragTargetRef.current = 'node';
+        return;
+    }
+
     if (e.shiftKey) {
         setSelectedNodeIds(prev => {
             const next = new Set(prev);
@@ -171,13 +228,101 @@ const Canvas: React.FC = () => {
     setNodes(prev => prev.map(n => n.id === id ? { ...n, ...updates } : n));
   }, []);
 
-  const deleteSelected = () => {
-    const toDelete = selectedNodeIds;
-    setNodes(prev => prev.filter(n => !toDelete.has(n.id)));
-    setConnectors(prev => prev.filter(c => !toDelete.has(c.startNodeId) && !toDelete.has(c.endNodeId)));
+  const deleteSelected = useCallback(() => {
+    setNodes(prev => prev.filter(n => !selectedNodeIds.has(n.id)));
+    setConnectors(prev => prev.filter(c => !selectedNodeIds.has(c.startNodeId) && !selectedNodeIds.has(c.endNodeId)));
     setSelectedNodeIds(new Set());
     setConnectionSourceId(null);
-  };
+  }, [selectedNodeIds]);
+
+  const duplicateSelected = useCallback(() => {
+    if (selectedNodeIds.size === 0) return;
+
+    setNodes(prev => {
+        const newNodes: CanvasNode[] = [];
+        const newIds = new Set<string>();
+
+        prev.forEach(node => {
+            if (selectedNodeIds.has(node.id)) {
+                const newNode = {
+                    ...node,
+                    id: generateId(),
+                    x: node.x + 20,
+                    y: node.y + 20
+                };
+                newNodes.push(newNode);
+                newIds.add(newNode.id);
+            }
+        });
+
+        if (newNodes.length > 0) {
+            // We need to update selection to the new nodes, but we are inside a state update.
+            // We can trigger it via a setTimeout or by returning the new state and setting selection separately.
+            // However, since we can't easily sync state updates here without refs, let's just update nodes here.
+            // And use a side-effect (which is not pure, but React batching handles it usually) or a layout effect?
+            // Actually, best to just invoke `setSelectedNodeIds` here since it's an event handler.
+            // BUT this is inside the callback function passed to setNodes, so it's pure logic.
+            // Wait, I can't call setSelectedNodeIds INSIDE setNodes callback cleanly.
+
+            // Revert to using a Ref for nodes to avoid dependency on 'nodes' array for the closure.
+            return [...prev, ...newNodes];
+        }
+        return prev;
+    });
+
+    // To update selection, we need to know the IDs. We can recalculate or refactor.
+    // Let's use the nodesRef pattern instead for cleaner code.
+  }, [selectedNodeIds]);
+
+  // Ref for nodes to access current state in event listeners without re-binding
+  const nodesRef = useRef(nodes);
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) {
+            return;
+        }
+
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+            deleteSelected();
+        } else if (e.key === 'Escape') {
+            setSelectedNodeIds(new Set());
+            setConnectionSourceId(null);
+            setActiveTool(ToolType.SELECT);
+        } else if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+            e.preventDefault();
+            setSelectedNodeIds(new Set(nodesRef.current.map(n => n.id)));
+        } else if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+            e.preventDefault();
+            // Duplicate logic inline or call function that uses ref
+            const currentNodes = nodesRef.current;
+            const newNodes: CanvasNode[] = [];
+            const newIds = new Set<string>();
+
+            currentNodes.forEach(node => {
+                if (selectedNodeIds.has(node.id)) {
+                    const newNode = {
+                        ...node,
+                        id: generateId(),
+                        x: node.x + 20,
+                        y: node.y + 20
+                    };
+                    newNodes.push(newNode);
+                    newIds.add(newNode.id);
+                }
+            });
+
+            if (newNodes.length > 0) {
+                setNodes(prev => [...prev, ...newNodes]);
+                setSelectedNodeIds(newIds);
+            }
+        }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [deleteSelected, selectedNodeIds]); // removed nodes dependency
 
   const handleAIExpand = async () => {
     const selectedId = Array.from(selectedNodeIds)[0];
@@ -210,6 +355,22 @@ const Canvas: React.FC = () => {
     const n = nodes.find(node => node.id === id);
     if (!n) return { x: 0, y: 0 };
     return { x: n.x + n.width / 2, y: n.y + n.height / 2 };
+  };
+
+  const getConnectionPoints = (startId: string, endId: string) => {
+    const startNode = nodes.find(n => n.id === startId);
+    const endNode = nodes.find(n => n.id === endId);
+
+    if (!startNode || !endNode) return { start: { x:0, y:0 }, end: { x:0, y:0 } };
+
+    const startCenter = getNodeCenter(startId);
+    const endCenter = getNodeCenter(endId);
+
+    // Calculate intersection points
+    const start = getRectIntersection(startNode, endCenter);
+    const end = getRectIntersection(endNode, startCenter);
+
+    return { start, end };
   };
 
   const selectionPos = useMemo(() => {
@@ -248,12 +409,11 @@ const Canvas: React.FC = () => {
             <svg className="absolute top-0 left-0 overflow-visible w-full h-full">
                 {/* Existing Connections */}
                 {connectors.map(conn => {
-                    const s = getNodeCenter(conn.startNodeId);
-                    const e = getNodeCenter(conn.endNodeId);
+                    const { start, end } = getConnectionPoints(conn.startNodeId, conn.endNodeId);
                     return (
                         <path 
                             key={conn.id}
-                            d={`M ${s.x} ${s.y} L ${e.x} ${e.y}`}
+                            d={`M ${start.x} ${start.y} L ${end.x} ${end.y}`}
                             stroke="#cbd5e1"
                             strokeWidth="2"
                             fill="none"
@@ -263,16 +423,21 @@ const Canvas: React.FC = () => {
                 })}
 
                 {/* Connection Preview */}
-                {connectionSourceId && (
-                    <path 
-                        d={`M ${getNodeCenter(connectionSourceId).x} ${getNodeCenter(connectionSourceId).y} L ${mouseCanvasPos.x} ${mouseCanvasPos.y}`}
-                        stroke="#9333ea"
-                        strokeWidth="2"
-                        strokeDasharray="4 4"
-                        fill="none"
-                        markerEnd="url(#arrowhead-active)"
-                    />
-                )}
+                {connectionSourceId && (() => {
+                    const sourceNode = nodes.find(n => n.id === connectionSourceId);
+                    if (!sourceNode) return null;
+                    const start = getRectIntersection(sourceNode, mouseCanvasPos);
+                    return (
+                        <path
+                            d={`M ${start.x} ${start.y} L ${mouseCanvasPos.x} ${mouseCanvasPos.y}`}
+                            stroke="#9333ea"
+                            strokeWidth="2"
+                            strokeDasharray="4 4"
+                            fill="none"
+                            markerEnd="url(#arrowhead-active)"
+                        />
+                    );
+                })()}
             </svg>
 
             {/* Nodes Layer */}
@@ -290,6 +455,19 @@ const Canvas: React.FC = () => {
                   />
               ))}
             </div>
+
+            {/* Selection Box */}
+            {selectionBox && (
+                <div
+                    className="absolute bg-purple-500/10 border border-purple-500/50 pointer-events-none"
+                    style={{
+                        left: Math.min(selectionBox.startX, selectionBox.endX),
+                        top: Math.min(selectionBox.startY, selectionBox.endY),
+                        width: Math.abs(selectionBox.endX - selectionBox.startX),
+                        height: Math.abs(selectionBox.endY - selectionBox.startY)
+                    }}
+                />
+            )}
         </div>
       </div>
 
