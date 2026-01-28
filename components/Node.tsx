@@ -8,10 +8,11 @@ interface NodeProps {
   isConnectionSource: boolean;
   onSelect: (e: React.MouseEvent) => void;
   onChange: (id: string, updates: Partial<CanvasNode>) => void;
+  onStartConnect?: (e: React.MouseEvent, nodeId: string) => void;
   scale: number;
 }
 
-const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectionSource, onSelect, onChange, scale }) => {
+const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectionSource, onSelect, onChange, onStartConnect, scale }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const nodeRef = useRef<HTMLDivElement>(null);
 
@@ -88,6 +89,15 @@ const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectio
   
   let shapeClasses = "";
   let textClasses = "text-center w-full h-full bg-transparent resize-none outline-none overflow-hidden font-medium text-gray-800 placeholder-gray-400/50";
+
+  // Add pointer-events-auto to ensure clicks reach the textarea when not dragging
+  // But wait, if we want to drag by clicking ANYWHERE on the node, the textarea might block it?
+  // No, if we click textarea, it focuses. To drag, we usually click the "body".
+  // Whimsical behavior: Clicking text focuses it immediately if it's already selected?
+  // Or: Single click selects node. Double click edits text.
+  // The user says "text not working".
+  // Currently: onMouseDown stops propagation. So clicking textarea focuses it.
+  // BUT: if `pointer-events-none` is applied via some class? No.
   
   if (node.type === NodeType.STICKY) {
     shapeClasses = `${node.color} shadow-sm`;
@@ -118,7 +128,7 @@ const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectio
   return (
     <div
       ref={nodeRef}
-      className={`${baseStyles} ${selectionStyles} ${shapeClasses}`}
+      className={`${baseStyles} ${selectionStyles} ${shapeClasses} group`}
       style={{
         left: node.x,
         top: node.y,
@@ -137,7 +147,14 @@ const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectio
           className={`${textClasses} ${isConnecting ? 'pointer-events-none' : ''}`}
           style={{ cursor: isConnecting ? 'crosshair' : 'text' }}
           spellCheck={false}
-          onMouseDown={(e) => !isConnecting && e.stopPropagation()} 
+          onMouseDown={(e) => {
+             // Stop propagation to prevent canvas drag/selection.
+             // But we only want to stop if we are NOT connecting.
+             if (!isConnecting) {
+                 e.stopPropagation();
+             }
+          }}
+          onKeyDown={(e) => e.stopPropagation()} // Stop delete/backspace from deleting the node while typing
         />
       </div>
 
@@ -152,6 +169,53 @@ const Node: React.FC<NodeProps> = ({ node, isSelected, isConnecting, isConnectio
             <ResizeHandle cursor="s-resize" direction="s" className="-bottom-1.5 left-1/2 -translate-x-1/2" />
             <ResizeHandle cursor="se-resize" direction="se" className="-bottom-1.5 -right-1.5" />
         </>
+      )}
+
+      {/* Connection Anchors (Visible on Hover or Selection) */}
+      {!isConnecting && (
+          <>
+            {/* Top */}
+            <div
+                className="absolute -top-3 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-purple-500 opacity-0 group-hover:opacity-100 hover:scale-125 transition-all cursor-crosshair z-50 flex items-center justify-center shadow-sm text-white peer/top"
+                onMouseDown={(e) => onStartConnect && onStartConnect(e, node.id)}
+            >
+                <div className="w-1.5 h-1.5 bg-white rounded-full pointer-events-none" />
+            </div>
+            {/* Ghost Clone Preview Top */}
+            <div className="absolute -top-[50px] left-1/2 -translate-x-1/2 w-full h-full opacity-0 peer-hover/top:opacity-30 pointer-events-none transition-opacity bg-current rounded-lg border border-dashed border-gray-400" />
+
+
+             {/* Bottom */}
+             <div
+                className="absolute -bottom-3 left-1/2 -translate-x-1/2 w-4 h-4 rounded-full bg-purple-500 opacity-0 group-hover:opacity-100 hover:scale-125 transition-all cursor-crosshair z-50 flex items-center justify-center shadow-sm peer/bottom"
+                onMouseDown={(e) => onStartConnect && onStartConnect(e, node.id)}
+            >
+                <div className="w-1.5 h-1.5 bg-white rounded-full pointer-events-none" />
+            </div>
+            {/* Ghost Clone Preview Bottom */}
+            <div className="absolute -bottom-[50px] left-1/2 -translate-x-1/2 w-full h-full opacity-0 peer-hover/bottom:opacity-30 pointer-events-none transition-opacity bg-current rounded-lg border border-dashed border-gray-400" />
+
+
+             {/* Left */}
+             <div
+                className="absolute top-1/2 -translate-y-1/2 -left-3 w-4 h-4 rounded-full bg-purple-500 opacity-0 group-hover:opacity-100 hover:scale-125 transition-all cursor-crosshair z-50 flex items-center justify-center shadow-sm peer/left"
+                onMouseDown={(e) => onStartConnect && onStartConnect(e, node.id)}
+            >
+                <div className="w-1.5 h-1.5 bg-white rounded-full pointer-events-none" />
+            </div>
+            {/* Ghost Clone Preview Left */}
+            <div className="absolute top-1/2 -translate-y-1/2 -left-[50px] -translate-x-full w-full h-full opacity-0 peer-hover/left:opacity-30 pointer-events-none transition-opacity bg-current rounded-lg border border-dashed border-gray-400" />
+
+             {/* Right */}
+             <div
+                className="absolute top-1/2 -translate-y-1/2 -right-3 w-4 h-4 rounded-full bg-purple-500 opacity-0 group-hover:opacity-100 hover:scale-125 transition-all cursor-crosshair z-50 flex items-center justify-center shadow-sm peer/right"
+                onMouseDown={(e) => onStartConnect && onStartConnect(e, node.id)}
+            >
+                 <div className="w-1.5 h-1.5 bg-white rounded-full pointer-events-none" />
+            </div>
+            {/* Ghost Clone Preview Right */}
+            <div className="absolute top-1/2 -translate-y-1/2 -right-[50px] translate-x-full w-full h-full opacity-0 peer-hover/right:opacity-30 pointer-events-none transition-opacity bg-current rounded-lg border border-dashed border-gray-400" />
+          </>
       )}
     </div>
   );
