@@ -1,7 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { NodeType, NodeColor, ShapeType } from '../types';
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Use import.meta.env for Vite or fallback to empty string to prevent crash
+const apiKey = (import.meta as any).env?.VITE_API_KEY || '';
+// Note: GoogleGenAI throws if apiKey is missing in some versions, or might fail later.
+// We should lazy load or handle it.
+
+let ai: GoogleGenAI | null = null;
+try {
+    if (apiKey) {
+        ai = new GoogleGenAI({ apiKey });
+    }
+} catch (e) {
+    console.warn("AI Service disabled:", e);
+}
 
 export interface GeneratedNode {
   text: string;
@@ -14,6 +26,10 @@ export interface GeneratedMindMap {
 }
 
 export const generateMindMapData = async (topic: string): Promise<GeneratedMindMap | null> => {
+  if (!ai) {
+      console.warn("AI service not initialized (missing API Key)");
+      return null;
+  }
   try {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
