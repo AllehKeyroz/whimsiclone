@@ -26,6 +26,9 @@ const Canvas: React.FC = () => {
   // Selection Box State
   const [selectionBox, setSelectionBox] = useState<{startX: number, startY: number, endX: number, endY: number} | null>(null);
 
+  // Phantom Node State (for creation)
+  const [phantomNode, setPhantomNode] = useState<CanvasNode | null>(null);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const dragTargetRef = useRef<'viewport' | 'node' | 'selection' | null>(null);
   const lastMousePos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -75,6 +78,18 @@ const Canvas: React.FC = () => {
     };
   };
 
+  // Update phantom node when tool changes
+  useEffect(() => {
+    if (activeTool !== ToolType.SELECT && activeTool !== ToolType.PAN && activeTool !== ToolType.CONNECTOR) {
+        // Create a phantom node at center of screen (initially) or last mouse pos?
+        // We'll update it on mouse move. For now just set type.
+        // Actually, we need coordinates. Let's wait for mouse move.
+        setPhantomNode(createNode(activeTool as unknown as NodeType, mouseCanvasPos.x, mouseCanvasPos.y));
+    } else {
+        setPhantomNode(null);
+    }
+  }, [activeTool]);
+
   const handleMouseDown = (e: React.MouseEvent) => {
     const isCanvasClick = e.target === containerRef.current;
     const { x, y } = screenToCanvas(e.clientX, e.clientY);
@@ -90,10 +105,14 @@ const Canvas: React.FC = () => {
             if (!e.shiftKey) setSelectedNodeIds(new Set());
             setConnectionSourceId(null);
         } else if (activeTool !== ToolType.CONNECTOR) {
+            // Place the phantom node
             const newNode = createNode(activeTool as unknown as NodeType, x, y);
             setNodes(prev => [...prev, newNode]);
             setSelectedNodeIds(new Set([newNode.id]));
-            if (!e.shiftKey) setActiveTool(ToolType.SELECT);
+            if (!e.shiftKey) {
+                setActiveTool(ToolType.SELECT);
+                setPhantomNode(null);
+            }
         } else {
             // Connector tool click on canvas - clear selection
              setSelectedNodeIds(new Set());
@@ -112,6 +131,11 @@ const Canvas: React.FC = () => {
     const { x, y } = screenToCanvas(e.clientX, e.clientY);
     setMouseCanvasPos({ x, y });
 
+    // Update phantom node position
+    if (phantomNode && activeTool !== ToolType.SELECT && activeTool !== ToolType.PAN && activeTool !== ToolType.CONNECTOR) {
+        setPhantomNode(prev => prev ? { ...prev, x: x - prev.width / 2, y: y - prev.height / 2 } : null);
+    }
+
     if (dragTargetRef.current === 'viewport') {
         setViewport(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
     } else if (dragTargetRef.current === 'node' && selectedNodeIds.size > 0 && activeTool === ToolType.SELECT) {
@@ -127,7 +151,37 @@ const Canvas: React.FC = () => {
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: React.MouseEvent) => {
+    if (activeTool === ToolType.CONNECTOR && connectionSourceId) {
+        // Check for node under mouse manually since events might not propagate
+        const { x, y } = screenToCanvas(e.clientX, e.clientY);
+        const targetNode = nodes.find(n =>
+            x >= n.x && x <= n.x + n.width &&
+            y >= n.y && y <= n.y + n.height &&
+            n.id !== connectionSourceId
+        );
+
+        if (targetNode) {
+             const exists = connectors.some(c => (c.startNodeId === connectionSourceId && c.endNodeId === targetNode.id));
+             if (!exists) {
+                setConnectors(prev => [...prev, {
+                    id: generateId(),
+                    startNodeId: connectionSourceId,
+                    endNodeId: targetNode.id
+                }]);
+             }
+        } else {
+            // Free floating connection
+            setConnectors(prev => [...prev, {
+                id: generateId(),
+                startNodeId: connectionSourceId,
+                endPosition: { x, y }
+            }]);
+        }
+        setConnectionSourceId(null);
+        setActiveTool(ToolType.SELECT);
+    }
+
     if (dragTargetRef.current === 'selection' && selectionBox) {
         // Calculate intersection
         const x1 = Math.min(selectionBox.startX, selectionBox.endX);
@@ -158,6 +212,15 @@ const Canvas: React.FC = () => {
     } else {
         setViewport(prev => ({ ...prev, x: prev.x - e.deltaX, y: prev.y - e.deltaY }));
     }
+  };
+
+  const handleStartConnect = (e: React.MouseEvent, nodeId: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setConnectionSourceId(nodeId);
+    setActiveTool(ToolType.CONNECTOR);
+    const { x, y } = screenToCanvas(e.clientX, e.clientY);
+    setMouseCanvasPos({ x, y });
   };
 
   const handleNodeSelect = (e: React.MouseEvent, id: string) => {
@@ -409,7 +472,21 @@ const Canvas: React.FC = () => {
             <svg className="absolute top-0 left-0 overflow-visible w-full h-full">
                 {/* Existing Connections */}
                 {connectors.map(conn => {
-                    const { start, end } = getConnectionPoints(conn.startNodeId, conn.endNodeId);
+                    let start = {x:0, y:0}, end = {x:0, y:0};
+
+                    if (conn.endNodeId) {
+                         // Cast to string to fix TS error, though it should be string.
+                         const pts = getConnectionPoints(conn.startNodeId, conn.endNodeId as string);
+                         start = pts.start;
+                         end = pts.end;
+                    } else if (conn.endPosition) {
+                        const startNode = nodes.find(n => n.id === conn.startNodeId);
+                        if (startNode) {
+                            start = getRectIntersection(startNode, conn.endPosition);
+                            end = conn.endPosition;
+                        }
+                    }
+
                     return (
                         <path 
                             key={conn.id}
@@ -418,6 +495,7 @@ const Canvas: React.FC = () => {
                             strokeWidth="2"
                             fill="none"
                             markerEnd="url(#arrowhead)"
+                            className="pointer-events-auto cursor-pointer hover:stroke-purple-400"
                         />
                     );
                 })}
@@ -451,9 +529,24 @@ const Canvas: React.FC = () => {
                       isConnectionSource={connectionSourceId === node.id}
                       onSelect={(e) => handleNodeSelect(e, node.id)}
                       onChange={updateNode}
+                      onStartConnect={handleStartConnect}
                       scale={viewport.zoom}
                   />
               ))}
+              {/* Phantom Node */}
+              {phantomNode && (
+                  <div className="opacity-60 pointer-events-none">
+                      <Node
+                          node={phantomNode}
+                          isSelected={false}
+                          isConnecting={false}
+                          isConnectionSource={false}
+                          onSelect={() => {}}
+                          onChange={() => {}}
+                          scale={viewport.zoom}
+                      />
+                  </div>
+              )}
             </div>
 
             {/* Selection Box */}

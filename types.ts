@@ -46,7 +46,8 @@ export interface CanvasNode {
 export interface Connector {
   id: string;
   startNodeId: string;
-  endNodeId: string;
+  endNodeId?: string; // Optional if connected to point
+  endPosition?: { x: number, y: number }; // Optional if connected to node
 }
 
 export interface Viewport {
